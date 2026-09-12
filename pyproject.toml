@@ -1,0 +1,22 @@
+[project]
+name = "des"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Scott Olesen", email = "ulp7@cdc.gov" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "altair>=6.2.2",
+    "polars>=1.44.2",
+    "scipy>=1.18.1",
+    "vl-convert-python>=1.9.0.post1",
+]
+
+[project.scripts]
+des = "des:main"
+
+[build-system]
+requires = ["uv_build>=0.8.22,<0.9.0"]
+build-backend = "uv_build"

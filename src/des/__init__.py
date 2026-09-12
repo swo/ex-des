@@ -3,6 +3,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Self
 
+import altair as alt
+import numpy as np
+import polars as pl
+import scipy.integrate
+
 
 @dataclass
 class Event:
@@ -39,7 +44,7 @@ class Simulation:
         self.events.append(event)
 
 
-class SirPair(Simulation):
+class Sir(Simulation):
     def __init__(
         self,
         n: int,
@@ -49,12 +54,12 @@ class SirPair(Simulation):
         end_time: float,
         seed=None,
     ):
-        """SIR simulation, where the loop is over contacts between all pairs of people"""
+        """SIR simulation, where the loop is over contacts from the infected"""
         super().__init__(end_time=end_time)
         random.seed(seed)
         self.state["compartment"] = ["s"] * n
         self.state["n"] = n
-        self.state["contact_rate"] = R0 * gamma * n
+        self.state["beta"] = R0 * gamma
         self.state["gamma"] = gamma
         self.info["timeseries"] = []
 
@@ -62,25 +67,24 @@ class SirPair(Simulation):
         for j in range(i0):
             self.infect(j)
 
-        # schedule the first contact
-        self.schedule_contact()
+    def schedule_contact(self, infector: int) -> None:
+        delay = random.expovariate(lambd=self.state["beta"])
+        self.schedule(
+            Event(
+                time=self.time + delay, fun=self.contact, kwargs={"infector": infector}
+            )
+        )
 
-    def schedule_contact(self) -> None:
-        delay = random.expovariate(lambd=self.state["contact_rate"])
-        self.schedule(Event(time=self.time + delay, fun=self.contact, kwargs={}))
+    def contact(self, infector: int):
+        if self.state["compartment"][infector] == "i":
+            contactees = list(range(self.state["n"]))
+            contactees.remove(infector)
+            contactee = random.sample(contactees, 1)[0]
 
-    def contact(self):
-        person1, person2 = random.sample(range(self.state["n"]), 2)
-        comp1 = self.state["compartment"][person1]
-        comp2 = self.state["compartment"][person2]
-        if comp1 == "s" and comp2 == "i":
-            self.infect(person1)
-        elif comp1 == "i" and comp2 == "s":
-            self.infect(person2)
-        else:
-            pass
+            if self.state["compartment"][contactee] == "s":
+                self.infect(contactee)
 
-        self.schedule_contact()
+            self.schedule_contact(infector)
 
     def infect(self, person: int) -> None:
         if self.state["compartment"][person] != "s":
@@ -90,6 +94,7 @@ class SirPair(Simulation):
         self.report_timeseries()
 
         self.schedule_recovery(person=person)
+        self.schedule_contact(infector=person)
 
     def schedule_recovery(self, person: int) -> None:
         delay = random.expovariate(lambd=self.state["gamma"])
@@ -108,26 +113,18 @@ class SirPair(Simulation):
         counts = [self.state["compartment"].count(c) for c in ["s", "i", "r"]]
         self.info["timeseries"].append((self.time, *counts))
 
+    def to_df(self) -> pl.DataFrame:
+        return pl.from_records(
+            self.info["timeseries"], orient="row", schema=["t", "s", "i", "r"]
+        ).unpivot(index="t")
 
-def main():
-    n = 1000
-    i0 = 10
-    R0 = 1.25
-    gamma = 0.25
-    end_time = 100.0
-    sim = SirPair(n=n, i0=i0, R0=R0, gamma=gamma, end_time=end_time).run()
 
-    import altair as alt
-    import polars as pl
-    import scipy.integrate
-
-    sim_df = pl.from_records(
-        sim.info["timeseries"], orient="row", schema=["t", "s", "i", "r"]
-    ).unpivot(index="t")
-
+def sir_ode(
+    n: float, i0: float, R0: float, gamma: float, end_time: float
+) -> pl.DataFrame:
     beta = R0 * gamma
 
-    def ode(t, y):
+    def ode(_, y):
         s, i, _ = y
         ds = -beta * s * i / n
         dr = gamma * i
@@ -138,15 +135,26 @@ def main():
         ode,
         t_span=(0.0, end_time),
         y0=(n - i0, i0, 0.0),
-        t_eval=sim_df["t"].unique().sort(),
+        t_eval=np.linspace(0.0, end_time, num=101),
         dense_output=True,
     )
 
-    ode_df = (
+    return (
         pl.from_numpy(res.y.T, schema=["s", "i", "r"])
         .with_columns(t=res.t)
         .unpivot(index="t")
     )
+
+
+def main():
+    n = 10000
+    i0 = 20
+    R0 = 1.5
+    gamma = 0.25
+    end_time = 100.0
+
+    sim_df = Sir(n=n, i0=i0, R0=R0, gamma=gamma, end_time=end_time).run().to_df()
+    ode_df = sir_ode(n=n, i0=i0, R0=R0, gamma=gamma, end_time=end_time)
 
     df = pl.concat(
         [

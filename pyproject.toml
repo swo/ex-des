@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "altair>=6.2.2",
+    "numpy>=2.5.3",
     "polars>=1.44.2",
     "scipy>=1.18.1",
     "vl-convert-python>=1.9.0.post1",

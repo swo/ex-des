@@ -33,6 +33,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "altair" },
+    { name = "numpy" },
     { name = "polars" },
     { name = "scipy" },
     { name = "vl-convert-python" },
@@ -41,6 +42,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "altair", specifier = ">=6.2.2" },
+    { name = "numpy", specifier = ">=2.5.3" },
     { name = "polars", specifier = ">=1.44.2" },
     { name = "scipy", specifier = ">=1.18.1" },
     { name = "vl-convert-python", specifier = ">=1.9.0.post1" },

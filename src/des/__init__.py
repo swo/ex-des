@@ -59,7 +59,7 @@ class Sir(Simulation):
         random.seed(seed)
         self.state["compartment"] = ["s"] * n
         self.state["n"] = n
-        self.state["beta"] = R0 * gamma
+        self.state["contact_rate"] = R0 * gamma * n
         self.state["gamma"] = gamma
         self.info["timeseries"] = []
 
@@ -67,24 +67,24 @@ class Sir(Simulation):
         for j in range(i0):
             self.infect(j)
 
-    def schedule_contact(self, infector: int) -> None:
-        delay = random.expovariate(lambd=self.state["beta"])
-        self.schedule(
-            Event(
-                time=self.time + delay, fun=self.contact, kwargs={"infector": infector}
-            )
-        )
+        self.schedule_contact()
 
-    def contact(self, infector: int):
-        if self.state["compartment"][infector] == "i":
-            contactees = list(range(self.state["n"]))
-            contactees.remove(infector)
-            contactee = random.sample(contactees, 1)[0]
+    def schedule_contact(self) -> None:
+        delay = random.expovariate(lambd=self.state["contact_rate"])
+        self.schedule(Event(time=self.time + delay, fun=self.contact, kwargs={}))
 
-            if self.state["compartment"][contactee] == "s":
-                self.infect(contactee)
+    def contact(self):
+        infector, infectee = random.sample(range(self.state["n"]), 2)
 
-            self.schedule_contact(infector)
+        # note that we're interested in I->S, not also S<-I, because that's
+        # equivalent to doubling the rate of contacts
+        if (
+            self.state["compartment"][infector] == "i"
+            and self.state["compartment"][infectee] == "s"
+        ):
+            self.infect(infectee)
+
+        self.schedule_contact()
 
     def infect(self, person: int) -> None:
         if self.state["compartment"][person] != "s":
@@ -94,7 +94,6 @@ class Sir(Simulation):
         self.report_timeseries()
 
         self.schedule_recovery(person=person)
-        self.schedule_contact(infector=person)
 
     def schedule_recovery(self, person: int) -> None:
         delay = random.expovariate(lambd=self.state["gamma"])

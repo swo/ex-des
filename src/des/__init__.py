@@ -1,10 +1,10 @@
-import random
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Self
+from typing import Literal, Self
 
 import altair as alt
 import numpy as np
+import numpy.random
 import polars as pl
 import scipy.integrate
 
@@ -13,16 +13,42 @@ import scipy.integrate
 class Event:
     time: float
     fun: Callable
-    kwargs: dict
+    kwargs: dict | None = None
+
+
+@dataclass
+class State:
+    compartments: list[Literal["s", "i", "r"]]
+    n: int
+    beta: float
+    gamma: float
+    rng: numpy.random.Generator
 
 
 class Simulation:
-    def __init__(self, end_time: float):
-        self.state = {}
+    def __init__(
+        self, n: int, i0: int, R0: float, gamma: float, end_time: float, seed=None
+    ):
+        self.state = State(
+            compartments=["s"] * n,
+            n=n,
+            beta=R0 * gamma,
+            gamma=gamma,
+            rng=numpy.random.default_rng(seed),
+        )
         self.time = 0
         self.events: list[Event] = []
-        self.info = {}
+        # the statistics ("info") will be a timeseries of counts of each compartment
+        self.info = []
         self.end_time = end_time
+
+        # initialize the simulation
+        # perform the initial infections
+        for j in range(i0):
+            self.infect(j)
+
+        # schedule the first contact
+        self.schedule_contact()
 
     def run(self) -> Self:
         while self.events:
@@ -37,93 +63,71 @@ class Simulation:
         return self
 
     def resolve(self, event: Event) -> None:
+        if event.time < self.time:
+            raise RuntimeError
+
         self.time = event.time
-        event.fun(**event.kwargs)
+        event.fun(**(event.kwargs or {}))
 
     def schedule(self, event: Event) -> None:
         self.events.append(event)
 
-
-class Sir(Simulation):
-    def __init__(
-        self,
-        n: int,
-        i0: int,
-        R0: float,
-        gamma: float,
-        end_time: float,
-        seed=None,
-    ):
-        """SIR simulation, where the loop is over contacts from the infected"""
-        super().__init__(end_time=end_time)
-        random.seed(seed)
-        self.state["compartment"] = ["s"] * n
-        self.state["n"] = n
-        self.state["contact_rate"] = R0 * gamma * n
-        self.state["gamma"] = gamma
-        self.info["timeseries"] = []
-
-        # perform the initial infections
-        for j in range(i0):
-            self.infect(j)
-
-        self.schedule_contact()
-
     def schedule_contact(self) -> None:
-        delay = random.expovariate(lambd=self.state["contact_rate"])
-        self.schedule(Event(time=self.time + delay, fun=self.contact, kwargs={}))
+        contact_rate = self.state.beta * self.state.n
+        delay = self.state.rng.exponential(scale=1.0 / contact_rate)
+        self.schedule(Event(time=self.time + delay, fun=self.contact))
 
     def contact(self):
-        infector, infectee = random.sample(range(self.state["n"]), 2)
+        infector, infectee = self.state.rng.choice(
+            range(self.state.n), size=2, replace=False
+        )
 
         # note that we're interested in I->S, not also S<-I, because that's
         # equivalent to doubling the rate of contacts
         if (
-            self.state["compartment"][infector] == "i"
-            and self.state["compartment"][infectee] == "s"
+            self.state.compartments[infector] == "i"
+            and self.state.compartments[infectee] == "s"
         ):
             self.infect(infectee)
 
         self.schedule_contact()
 
     def infect(self, person: int) -> None:
-        if self.state["compartment"][person] != "s":
+        if self.state.compartments[person] != "s":
             raise RuntimeError
 
-        self.state["compartment"][person] = "i"
+        self.state.compartments[person] = "i"
+        self.schedule_recovery(person=person)
         self.report_timeseries()
 
-        self.schedule_recovery(person=person)
-
     def schedule_recovery(self, person: int) -> None:
-        delay = random.expovariate(lambd=self.state["gamma"])
+        delay = self.state.rng.exponential(scale=1.0 / self.state.gamma)
         self.schedule(
             Event(time=self.time + delay, fun=self.recover, kwargs={"person": person})
         )
 
     def recover(self, person: int) -> None:
-        if self.state["compartment"][person] != "i":
+        if self.state.compartments[person] != "i":
             raise RuntimeError
 
-        self.state["compartment"][person] = "r"
+        self.state.compartments[person] = "r"
         self.report_timeseries()
 
     def report_timeseries(self) -> None:
-        counts = [self.state["compartment"].count(c) for c in ["s", "i", "r"]]
-        self.info["timeseries"].append((self.time, *counts))
+        counts = [self.state.compartments.count(c) for c in ["s", "i", "r"]]
+        self.info.append((self.time, *counts))
 
     def to_df(self) -> pl.DataFrame:
         return pl.from_records(
-            self.info["timeseries"], orient="row", schema=["t", "s", "i", "r"]
+            self.info, orient="row", schema=["t", "s", "i", "r"]
         ).unpivot(index="t")
 
 
-def sir_ode(
-    n: float, i0: float, R0: float, gamma: float, end_time: float
-) -> pl.DataFrame:
+def ode(n: float, i0: float, R0: float, gamma: float, end_time: float) -> pl.DataFrame:
+    """ODE solution of the SIR model"""
     beta = R0 * gamma
 
-    def ode(_, y):
+    def rates(_, y):
         s, i, _ = y
         ds = -beta * s * i / n
         dr = gamma * i
@@ -131,7 +135,7 @@ def sir_ode(
         return (ds, di, dr)
 
     res = scipy.integrate.solve_ivp(
-        ode,
+        rates,
         t_span=(0.0, end_time),
         y0=(n - i0, i0, 0.0),
         t_eval=np.linspace(0.0, end_time, num=101),
@@ -146,14 +150,14 @@ def sir_ode(
 
 
 def main():
-    n = 10000
-    i0 = 20
+    n = 1000
+    i0 = 10
     R0 = 1.5
     gamma = 0.25
     end_time = 100.0
 
-    sim_df = Sir(n=n, i0=i0, R0=R0, gamma=gamma, end_time=end_time).run().to_df()
-    ode_df = sir_ode(n=n, i0=i0, R0=R0, gamma=gamma, end_time=end_time)
+    sim_df = Simulation(n=n, i0=i0, R0=R0, gamma=gamma, end_time=end_time).run().to_df()
+    ode_df = ode(n=n, i0=i0, R0=R0, gamma=gamma, end_time=end_time)
 
     df = pl.concat(
         [
